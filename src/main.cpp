@@ -2,52 +2,60 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Wire.h>
-#include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <Adafruit_SSD1306.h>
 
 // ============================
-// Hardware configuration
+// Пины устройства
 // ============================
-constexpr int TFT_CS = 5;
-constexpr int TFT_RST = 17;
-constexpr int TFT_DC = 16;
-constexpr int TFT_MOSI = 11;
-constexpr int TFT_SCK = 12;
-constexpr int TFT_LED = 4;
+constexpr uint8_t TFT_CS   = 5;
+constexpr uint8_t TFT_RST  = 17;
+constexpr uint8_t TFT_DC   = 16;
+constexpr uint8_t TFT_MOSI = 11;
+constexpr uint8_t TFT_SCK  = 12;
+constexpr uint8_t TFT_LED  = 4;
 
-constexpr int SD_CS = 10;
-constexpr int SD_MISO = 13;
+constexpr uint8_t SD_CS   = 10;
+constexpr uint8_t SD_MISO = 13;
 
-constexpr int OLED_SDA = 8;
-constexpr int OLED_SCL = 9;
-constexpr int OLED_W = 128;
-constexpr int OLED_H = 64;
+constexpr uint8_t OLED_SDA = 8;
+constexpr uint8_t OLED_SCL = 9;
 
-constexpr int BEEP_PIN = 18;
+constexpr uint8_t BUZZER = 18;
 
-constexpr int BUTTON_UP = 1;
-constexpr int BUTTON_DOWN = 2;
-constexpr int BUTTON_LEFT = 3;
-constexpr int BUTTON_RIGHT = 6;
-constexpr int BUTTON_A = 7;
-constexpr int BUTTON_B = 15;
-constexpr int BUTTON_C = 46;
-constexpr int BUTTON_D = 45;
-constexpr int BUTTON_VOL = 42;
+constexpr uint8_t BTN_UP    = 1;
+constexpr uint8_t BTN_DOWN  = 2;
+constexpr uint8_t BTN_LEFT  = 3;
+constexpr uint8_t BTN_RIGHT = 6;
+constexpr uint8_t BTN_A     = 7;
+constexpr uint8_t BTN_B     = 15;
+constexpr uint8_t BTN_C     = 46;
+constexpr uint8_t BTN_D     = 45;
+constexpr uint8_t BTN_VOL   = 42;
 
-const uint8_t buttonPins[] = {
-  BUTTON_UP,
-  BUTTON_DOWN,
-  BUTTON_LEFT,
-  BUTTON_RIGHT,
-  BUTTON_A,
-  BUTTON_B,
-  BUTTON_C,
-  BUTTON_D,
-  BUTTON_VOL
+const uint8_t buttons[] = {
+  BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT,
+  BTN_A, BTN_B, BTN_C, BTN_D, BTN_VOL
 };
+
+// ============================
+// Цвета старого дизайна RGB565
+// ============================
+constexpr uint16_t COL_BG       = 0x0000;
+constexpr uint16_t COL_RED      = 0xF800;
+constexpr uint16_t COL_WHITE    = 0xFFFF;
+constexpr uint16_t COL_GRAY     = 0x8410;
+constexpr uint16_t COL_LIGHT    = 0xC618;
+constexpr uint16_t COL_ITEM_BG  = 0x2104;
+constexpr uint16_t COL_DARK     = 0x4208;
+
+Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_SSD1306 oled(128, 64, &Wire, -1);
+
+// ВАЖНО: rotation 3 — как в исходном коде пользователя.
+// При такой ориентации интерфейс использует область 160x128.
+constexpr uint8_t DISPLAY_ROTATION = 3;
 
 enum Screen {
   SCREEN_MAIN,
@@ -55,26 +63,13 @@ enum Screen {
   SCREEN_SETTINGS
 };
 
-Screen currentScreen = SCREEN_MAIN;
+Screen screen = SCREEN_MAIN;
 
-struct ConsoleSettings {
-  uint8_t volume = 3;
-  bool soundEnabled = true;
-};
-
-ConsoleSettings settings;
-Preferences prefs;
-
-bool previousButtons[9] = {false};
-
-Adafruit_ST7735 tft(TFT_CS, TFT_DC, TFT_RST);
-Adafruit_SSD1306 oled(OLED_W, OLED_H, &Wire, -1);
-
-const char* mainItems[] = {"GAMES", "VOLUME", "SETTINGS"};
-const char* settingsItems[] = {"SOUND", "VOLUME", "BACK"};
-const char* gameNames[10] = {
-  "SNAKE", "TETRIS", "DUNGEON", "ARKANOID", "RACER",
-  "SHOOTER", "PUZZLE", "RPG", "MUSIC", "TEST"
+const char* mainItems[] = {"GAMES", "VOLUME", "SETTING"};
+const char* settingItems[] = {"SOUND", "VOLUME", "BACK"};
+const char* gameNames[] = {
+  "SNAKE", "TETRIS", "NONE", "NONE", "NONE",
+  "NONE", "NONE", "NONE", "NONE", "NONE"
 };
 
 bool gameExists[10] = {
@@ -85,398 +80,287 @@ bool gameExists[10] = {
 int mainSelected = 0;
 int gamesSelected = 0;
 int settingsSelected = 0;
-bool sdReady = false;
+
+bool lastButtonState[9] = {false};
+uint8_t volumeLevel = 3;
+bool soundEnabled = true;
 
 // ============================
-// General helpers
+// Ввод и звук
 // ============================
-bool buttonPressed(uint8_t index) {
-  bool current = digitalRead(buttonPins[index]) == LOW;
-  bool result = current && !previousButtons[index];
-  previousButtons[index] = current;
-  return result;
+bool pressed(uint8_t index) {
+  bool state = digitalRead(buttons[index]) == LOW;
+  bool event = state && !lastButtonState[index];
+  lastButtonState[index] = state;
+  return event;
 }
 
-void showOLEDStatus(const String& line1, const String& line2 = "") {
+void beep(uint16_t frequency, uint16_t duration = 60) {
+  if (!soundEnabled || volumeLevel == 0) return;
+
+  uint8_t duty = map(volumeLevel, 0, 5, 0, 255);
+  ledcWrite(0, duty);
+  ledcWriteTone(0, frequency);
+  delay(duration);
+  ledcWriteTone(0, 0);
+  ledcWrite(0, 0);
+}
+
+void showOLED(const String& line1, const String& line2 = "") {
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
   oled.setTextSize(1);
   oled.setCursor(0, 0);
   oled.println("ESP32 GAMEBOX");
   oled.drawLine(0, 10, 127, 10, SSD1306_WHITE);
-  oled.setCursor(0, 18);
+  oled.setCursor(0, 20);
   oled.println(line1);
-  oled.setCursor(0, 34);
+  oled.setCursor(0, 36);
   oled.println(line2);
   oled.display();
 }
 
-void playTone(uint16_t frequency, uint16_t duration = 80) {
-  if (!settings.soundEnabled) {
-    return;
-  }
-
-  ledcWriteTone(0, frequency);
-  delay(duration);
-  ledcWriteTone(0, 0);
-}
-
-void updateBuzzerLevel() {
-  uint8_t level = settings.volume;
-  uint8_t duty = map(level, 0, 5, 0, 255);
-  ledcWrite(0, duty);
-}
-
-void loadSettings() {
-  prefs.begin("esp32_gamebox", false);
-  settings.volume = prefs.getUChar("volume", 3);
-  settings.soundEnabled = prefs.getBool("sound", true);
-  prefs.end();
-
-  if (settings.volume > 5) {
-    settings.volume = 5;
-  }
-}
-
-void saveSettings() {
-  prefs.begin("esp32_gamebox", false);
-  prefs.putUChar("volume", settings.volume);
-  prefs.putBool("sound", settings.soundEnabled);
-  prefs.end();
-}
-
-void initBuzzer() {
-  ledcSetup(0, 2000, 8);
-  ledcAttachPin(BEEP_PIN, 0);
-  ledcWrite(0, 0);
-  updateBuzzerLevel();
-}
-
-void initButtons() {
-  for (uint8_t pin : buttonPins) {
-    pinMode(pin, INPUT_PULLUP);
-  }
-}
-
 // ============================
-// TFT drawing functions
+// Главное меню — старый дизайн
 // ============================
 void drawMainMenu() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.fillRect(0, 0, 160, 3, ST77XX_RED);
+  tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, 160, 3, COL_RED);
 
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(1);
-  tft.setCursor(4, 6);
-  tft.println("TERMINAL // M-03");
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COL_RED, COL_BG);
+  tft.drawString("TERMINAL // M-03", 4, 6, 1);
 
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 18);
-  tft.println("// SELECT");
-  tft.setTextColor(ST77XX_RED);
-  tft.setCursor(58, 18);
-  tft.println("PROTOCOL");
+  tft.setTextColor(COL_WHITE, COL_BG);
+  tft.drawString("// SELECT", 4, 18, 1);
+  tft.setTextColor(COL_RED, COL_BG);
+  tft.drawString("PROTOCOL", 58, 18, 1);
 
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(4, 30);
-  tft.println("MAIN");
-  tft.setCursor(4, 46);
-  tft.println("MENU");
+  tft.setTextColor(COL_WHITE, COL_BG);
+  tft.drawString("MAIN", 4, 30, 2);
+  tft.drawString("MENU", 4, 46, 2);
 
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 3; i++) {
     int y = 68 + i * 16;
 
     if (i == mainSelected) {
-      tft.fillRoundRect(4, y, 152, 14, 2, ST77XX_WHITE);
-      tft.drawRoundRect(4, y, 152, 14, 2, ST77XX_RED);
-      tft.fillRect(6, y + 2, 14, 10, ST77XX_RED);
-      tft.setTextColor(ST77XX_WHITE, ST77XX_RED);
-      tft.setCursor(13, y + 4);
-      tft.setTextSize(1);
-      tft.print(i + 1);
+      tft.fillRoundRect(4, y, 152, 14, 2, COL_WHITE);
+      tft.drawRoundRect(4, y, 152, 14, 2, COL_RED);
+      tft.fillRect(6, y + 2, 14, 10, COL_RED);
 
-      tft.setTextColor(ST77XX_BLACK, ST77XX_WHITE);
-      tft.setCursor(26, y + 3);
-      tft.setTextSize(2);
-      tft.print(mainItems[i]);
+      tft.setTextColor(COL_WHITE, COL_RED);
+      tft.drawNumber(i + 1, 10, y + 3, 1);
 
-      tft.setTextColor(ST77XX_RED, ST77XX_WHITE);
-      tft.setCursor(142, y + 5);
-      tft.setTextSize(1);
-      tft.print(">>");
+      tft.setTextColor(COL_BG, COL_WHITE);
+      tft.drawString(mainItems[i], 26, y + 2, 2);
+
+      tft.setTextColor(COL_RED, COL_WHITE);
+      tft.drawString(">>", 138, y + 4, 1);
     } else {
-      tft.fillRoundRect(4, y, 152, 14, 2, ST7735_BLUE);
-      tft.setTextColor(ST77XX_GRAY, ST7735_BLUE);
-      tft.setCursor(10, y + 3);
-      tft.setTextSize(1);
-      tft.print(i + 1);
+      tft.fillRoundRect(4, y, 152, 14, 2, COL_ITEM_BG);
 
-      tft.setTextColor(ST77XX_LIGHTGREY, ST7735_BLUE);
-      tft.setCursor(26, y + 3);
-      tft.setTextSize(2);
-      tft.print(mainItems[i]);
+      tft.setTextColor(COL_GRAY, COL_ITEM_BG);
+      tft.drawNumber(i + 1, 10, y + 3, 1);
 
-      tft.setTextColor(ST77XX_GRAY, ST7735_BLUE);
-      tft.setCursor(142, y + 5);
-      tft.print(">>");
+      tft.setTextColor(COL_LIGHT, COL_ITEM_BG);
+      tft.drawString(mainItems[i], 26, y + 2, 2);
+
+      tft.setTextColor(COL_GRAY, COL_ITEM_BG);
+      tft.drawString(">>", 138, y + 4, 1);
     }
   }
 
-  tft.setTextColor(ST77XX_GRAY);
-  tft.setTextSize(1);
-  tft.setCursor(4, 118);
-  tft.println("[A] OK   [UP/DN] NAV");
+  tft.setTextColor(COL_GRAY, COL_BG);
+  tft.drawString("[A] OK   [UP/DN] NAV", 4, 118, 1);
 }
 
+// ============================
+// Меню игр — старый дизайн
+// ============================
 void drawGamesMenu() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.fillRect(0, 0, 160, 3, ST77XX_RED);
+  tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, 160, 3, COL_RED);
 
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_RED);
-  tft.setCursor(4, 6);
-  tft.println("TERMINAL // M-03");
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COL_RED, COL_BG);
+  tft.drawString("TERMINAL // M-03", 4, 6, 1);
 
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(4, 16);
-  tft.println("// SELECT PROTOCOL");
+  tft.setTextColor(COL_WHITE, COL_BG);
+  tft.drawString("// SELECT PROTOCOL", 4, 16, 1);
+  tft.drawString("GAMES", 4, 28, 2);
 
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(4, 28);
-  tft.println("GAMES");
-
-  for (int i = 0; i < 10; ++i) {
+  for (int i = 0; i < 10; i++) {
     int col = (i < 5) ? 0 : 1;
     int row = i % 5;
     int x = 4 + col * 78;
     int y = 48 + row * 13;
 
     if (i == gamesSelected) {
-      tft.fillRoundRect(x, y, 74, 12, 2, ST77XX_WHITE);
-      tft.drawRoundRect(x, y, 74, 12, 2, ST77XX_RED);
-      tft.fillRect(x + 2, y + 2, 12, 8, ST77XX_RED);
-      tft.setTextColor(ST77XX_WHITE, ST77XX_RED);
-      tft.setTextSize(1);
-      tft.setCursor(x + 6, y + 3);
-      tft.print(i + 1);
-      tft.setTextColor(ST77XX_BLACK, ST77XX_WHITE);
-      tft.setCursor(x + 17, y + 2);
-      tft.print(gameNames[i]);
+      tft.fillRoundRect(x, y, 74, 12, 2, COL_WHITE);
+      tft.drawRoundRect(x, y, 74, 12, 2, COL_RED);
+      tft.fillRect(x + 2, y + 2, 12, 8, COL_RED);
+
+      tft.setTextColor(COL_WHITE, COL_RED);
+      tft.drawNumber(i + 1, x + 4, y + 2, 1);
+
+      tft.setTextColor(COL_BG, COL_WHITE);
+      tft.drawString(gameNames[i], x + 17, y + 2, 1);
     } else {
-      tft.fillRoundRect(x, y, 74, 12, 2, ST7735_BLUE);
-      tft.setTextColor(ST77XX_GRAY, ST7735_BLUE);
-      tft.setTextSize(1);
-      tft.setCursor(x + 4, y + 3);
-      tft.print(i + 1);
-      tft.setTextColor(gameExists[i] ? ST77XX_LIGHTGREY : ST77XX_DARKGREY, ST7735_BLUE);
-      tft.setCursor(x + 17, y + 2);
-      tft.print(gameNames[i]);
+      tft.fillRoundRect(x, y, 74, 12, 2, COL_ITEM_BG);
+
+      tft.setTextColor(COL_GRAY, COL_ITEM_BG);
+      tft.drawNumber(i + 1, x + 4, y + 2, 1);
+
+      tft.setTextColor(gameExists[i] ? COL_LIGHT : COL_GRAY, COL_ITEM_BG);
+      tft.drawString(gameNames[i], x + 17, y + 2, 1);
     }
   }
 
-  tft.setTextColor(ST77XX_GRAY);
-  tft.setTextSize(1);
-  tft.setCursor(4, 118);
-  tft.println("[A] PLAY   [B] BACK");
+  tft.setTextColor(COL_GRAY, COL_BG);
+  tft.drawString("[A] PLAY   [B] BACK", 4, 118, 1);
 }
 
+// ============================
+// Меню настроек — старый дизайн
+// ============================
 void drawSettingsMenu() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.fillRect(0, 0, 160, 3, ST77XX_RED);
+  tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, 160, 3, COL_RED);
 
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(1);
-  tft.setCursor(4, 6);
-  tft.println("TERMINAL // M-03");
+  tft.setTextColor(COL_RED, COL_BG);
+  tft.drawString("TERMINAL // M-03", 4, 6, 1);
 
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(4, 28);
-  tft.println("SETTINGS");
+  tft.setTextColor(COL_WHITE, COL_BG);
+  tft.drawString("// CONFIGURATION", 4, 18, 1);
+  tft.drawString("SETTING", 4, 30, 2);
 
-  int yBase = 60;
-  for (int i = 0; i < 3; ++i) {
-    int y = yBase + i * 18;
+  for (int i = 0; i < 3; i++) {
+    int y = 60 + i * 16;
 
     if (i == settingsSelected) {
-      tft.fillRoundRect(6, y, 148, 14, 2, ST77XX_WHITE);
-      tft.drawRoundRect(6, y, 148, 14, 2, ST77XX_RED);
-      tft.setTextColor(ST77XX_BLACK, ST77XX_WHITE);
+      tft.fillRoundRect(4, y, 152, 14, 2, COL_WHITE);
+      tft.drawRoundRect(4, y, 152, 14, 2, COL_RED);
+      tft.setTextColor(COL_BG, COL_WHITE);
+      tft.drawString(settingItems[i], 12, y + 3, 1);
     } else {
-      tft.fillRoundRect(6, y, 148, 14, 2, ST7735_BLUE);
-      tft.setTextColor(ST77XX_LIGHTGREY, ST7735_BLUE);
+      tft.fillRoundRect(4, y, 152, 14, 2, COL_ITEM_BG);
+      tft.setTextColor(COL_LIGHT, COL_ITEM_BG);
+      tft.drawString(settingItems[i], 12, y + 3, 1);
     }
-
-    tft.setTextSize(1);
-    tft.setCursor(12, y + 4);
-    tft.print(settingsItems[i]);
 
     if (i == 0) {
-      tft.setCursor(96, y + 4);
-      tft.print(settings.soundEnabled ? "ON" : "OFF");
+      tft.setTextColor(i == settingsSelected ? COL_RED : COL_GRAY,
+                       i == settingsSelected ? COL_WHITE : COL_ITEM_BG);
+      tft.drawString(soundEnabled ? "ON" : "OFF", 125, y + 3, 1);
     } else if (i == 1) {
-      tft.setCursor(96, y + 4);
-      tft.print("VOL:");
-      tft.print(settings.volume);
+      tft.setTextColor(i == settingsSelected ? COL_RED : COL_GRAY,
+                       i == settingsSelected ? COL_WHITE : COL_ITEM_BG);
+      tft.drawNumber(volumeLevel, 140, y + 3, 1);
     }
   }
 
-  tft.setTextColor(ST77XX_GRAY);
-  tft.setTextSize(1);
-  tft.setCursor(4, 118);
-  tft.println("[A] SET   [B] BACK");
+  tft.setTextColor(COL_GRAY, COL_BG);
+  tft.drawString("[A] SET   [B] BACK", 4, 118, 1);
 }
 
-void drawGameLaunchScreen(const char* title) {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(2);
-  tft.setCursor(12, 40);
-  tft.println("LOADING");
-
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(14, 70);
-  tft.println(title);
-
-  showOLEDStatus("Launching", String(title));
-  playTone(440, 90);
-  delay(400);
-  playTone(660, 110);
+void showGame(const char* name) {
+  tft.fillScreen(COL_RED);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(COL_WHITE, COL_RED);
+  tft.drawString(name, 80, 64, 4);
+  showOLED("GAME RUNNING", name);
+  beep(880, 100);
+  delay(700);
 }
 
 // ============================
-// Menu logic
+// Обработка меню
 // ============================
-void handleMainMenu() {
-  if (buttonPressed(0)) {
+void handleMain() {
+  if (pressed(0)) {
     mainSelected = (mainSelected + 2) % 3;
     drawMainMenu();
-    playTone(420, 35);
-  }
-
-  if (buttonPressed(1)) {
+    beep(420, 35);
+  } else if (pressed(1)) {
     mainSelected = (mainSelected + 1) % 3;
     drawMainMenu();
-    playTone(520, 35);
-  }
-
-  if (buttonPressed(4)) {
+    beep(520, 35);
+  } else if (pressed(4)) {
     if (mainSelected == 0) {
-      currentScreen = SCREEN_GAMES;
+      screen = SCREEN_GAMES;
       gamesSelected = 0;
       drawGamesMenu();
-      playTone(700, 80);
+      beep(700, 80);
     } else if (mainSelected == 1) {
-      settings.volume = (settings.volume + 1) % 6;
-      saveSettings();
-      updateBuzzerLevel();
+      volumeLevel = (volumeLevel + 1) % 6;
       drawMainMenu();
-      playTone(620, 80);
-    } else if (mainSelected == 2) {
-      currentScreen = SCREEN_SETTINGS;
+      beep(620, 80);
+    } else {
+      screen = SCREEN_SETTINGS;
       settingsSelected = 0;
       drawSettingsMenu();
-      playTone(620, 80);
+      beep(620, 80);
     }
   }
 }
 
-void handleGamesMenu() {
-  if (buttonPressed(0)) {
+void handleGames() {
+  if (pressed(0)) {
     gamesSelected = (gamesSelected + 9) % 10;
     drawGamesMenu();
-    playTone(450, 30);
-  }
-
-  if (buttonPressed(1)) {
+    beep(420, 35);
+  } else if (pressed(1)) {
     gamesSelected = (gamesSelected + 1) % 10;
     drawGamesMenu();
-    playTone(520, 30);
-  }
-
-  if (buttonPressed(2)) {
-    gamesSelected = (gamesSelected + 4) % 10;
-    drawGamesMenu();
-    playTone(500, 30);
-  }
-
-  if (buttonPressed(3)) {
-    gamesSelected = (gamesSelected + 6) % 10;
-    drawGamesMenu();
-    playTone(560, 30);
-  }
-
-  if (buttonPressed(5)) {
-    currentScreen = SCREEN_MAIN;
+    beep(520, 35);
+  } else if (pressed(5)) {
+    screen = SCREEN_MAIN;
     drawMainMenu();
-    playTone(260, 60);
-  }
-
-  if (buttonPressed(4)) {
+    beep(260, 60);
+  } else if (pressed(4)) {
     if (gameExists[gamesSelected]) {
-      drawGameLaunchScreen(gameNames[gamesSelected]);
-      delay(700);
+      showGame(gameNames[gamesSelected]);
       drawGamesMenu();
-      playTone(780, 100);
     } else {
-      showOLEDStatus("Game locked", "Not available");
-      playTone(180, 120);
+      showOLED("GAME UNAVAILABLE", "NOT INSTALLED");
+      beep(180, 120);
       delay(500);
       drawGamesMenu();
     }
   }
 }
 
-void handleSettingsMenu() {
-  if (buttonPressed(0)) {
+void handleSettings() {
+  if (pressed(0)) {
     settingsSelected = (settingsSelected + 2) % 3;
     drawSettingsMenu();
-    playTone(440, 30);
-  }
-
-  if (buttonPressed(1)) {
+    beep(420, 35);
+  } else if (pressed(1)) {
     settingsSelected = (settingsSelected + 1) % 3;
     drawSettingsMenu();
-    playTone(500, 30);
-  }
-
-  if (buttonPressed(5)) {
-    currentScreen = SCREEN_MAIN;
-    saveSettings();
+    beep(520, 35);
+  } else if (pressed(5)) {
+    screen = SCREEN_MAIN;
     drawMainMenu();
-    playTone(260, 60);
-  }
-
-  if (buttonPressed(4)) {
+    beep(260, 60);
+  } else if (pressed(4)) {
     if (settingsSelected == 0) {
-      settings.soundEnabled = !settings.soundEnabled;
-      saveSettings();
+      soundEnabled = !soundEnabled;
       drawSettingsMenu();
-      playTone(660, 80);
+      if (soundEnabled) beep(660, 80);
     } else if (settingsSelected == 1) {
-      settings.volume = (settings.volume + 1) % 6;
-      saveSettings();
-      updateBuzzerLevel();
+      volumeLevel = (volumeLevel + 1) % 6;
       drawSettingsMenu();
-      playTone(780, 80);
+      beep(780, 80);
     } else {
-      currentScreen = SCREEN_MAIN;
+      screen = SCREEN_MAIN;
       drawMainMenu();
-      playTone(320, 60);
+      beep(320, 60);
     }
-  }
-
-  if (buttonPressed(7)) {
-    if (settingsSelected == 1) {
-      settings.volume = (settings.volume == 0) ? 0 : settings.volume - 1;
-      saveSettings();
-      updateBuzzerLevel();
-      drawSettingsMenu();
-      playTone(240, 60);
-    }
+  } else if (pressed(7) && settingsSelected == 1) {
+    if (volumeLevel > 0) volumeLevel--;
+    drawSettingsMenu();
+    beep(240, 60);
   }
 }
 
@@ -488,55 +372,51 @@ void setup() {
 
   pinMode(TFT_LED, OUTPUT);
   digitalWrite(TFT_LED, HIGH);
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
 
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
 
-  initButtons();
-  loadSettings();
+  for (uint8_t pin : buttons) {
+    pinMode(pin, INPUT_PULLUP);
+  }
 
   Wire.begin(OLED_SDA, OLED_SCL);
-  if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED init failed");
-  }
+  oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  showOLED("BOOTING", "ESP32 GAMEBOX");
 
   SPI.begin(TFT_SCK, SD_MISO, TFT_MOSI);
   tft.initR(INITR_BLACKTAB);
-  tft.setRotation(2);
-  tft.fillScreen(ST77XX_BLACK);
+  tft.setRotation(DISPLAY_ROTATION);
+  tft.setTextWrap(false);
+  tft.fillScreen(COL_BG);
 
-  initBuzzer();
+  ledcSetup(0, 2000, 8);
+  ledcAttachPin(BUZZER, 0);
+  ledcWrite(0, 0);
 
-  showOLEDStatus("BOOTING", "ESP32 GAMEBOX");
-  delay(500);
-
-  sdReady = SD.begin(SD_CS, SPI);
-  if (sdReady) {
-    Serial.println("SD card ready");
-    showOLEDStatus("SD READY", "Scan games");
+  if (SD.begin(SD_CS, SPI)) {
+    Serial.println("SD ready");
+    showOLED("SD READY", "GAME STORAGE");
   } else {
-    Serial.println("SD card failed");
-    showOLEDStatus("SD FAIL", "No storage");
+    Serial.println("SD init failed");
+    showOLED("SD NOT FOUND", "MENU STILL WORKS");
   }
 
-  delay(600);
-
-  currentScreen = SCREEN_MAIN;
+  delay(500);
   drawMainMenu();
-  playTone(740, 90);
+  beep(740, 90);
 }
 
 void loop() {
-  if (currentScreen == SCREEN_MAIN) {
-    handleMainMenu();
-  } else if (currentScreen == SCREEN_GAMES) {
-    handleGamesMenu();
-  } else if (currentScreen == SCREEN_SETTINGS) {
-    handleSettingsMenu();
+  if (screen == SCREEN_MAIN) {
+    handleMain();
+  } else if (screen == SCREEN_GAMES) {
+    handleGames();
+  } else {
+    handleSettings();
   }
 
   delay(25);
 }
-
